@@ -1,7 +1,6 @@
 package gomigrate
 
 import (
-	"path/filepath"
 	"regexp"
 	"strconv"
 )
@@ -14,8 +13,7 @@ var (
 )
 
 // Returns the migration number, type and base name, so 1, "up", "migration" from "01_migration_up.sql"
-func parseMigrationPath(path string) (uint64, migrationType, string, error) {
-	filebase := filepath.Base(path)
+func parseMigrationPath(filebase string) (uint64, migrationType, string, error) {
 
 	matches := upMigrationFile.FindAllSubmatch([]byte(filebase), -1)
 	if matches != nil {

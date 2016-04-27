@@ -6,9 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"io/ioutil"
-	"log"
-	"os"
-	"path/filepath"
 	"sort"
 )
 
@@ -29,11 +26,11 @@ var (
 )
 
 type Migrator struct {
-	DB             *sql.DB
-	MigrationsPath string
-	dbAdapter      Migratable
-	migrations     map[uint64]*Migration
-	logger         Logger
+	DB         *sql.DB
+	dbAdapter  Migratable
+	migrations map[uint64]*Migration
+	logger     Logger
+	Source     MigrationSource
 }
 
 type Logger interface {
@@ -72,28 +69,15 @@ func (m *Migrator) CreateMigrationsTable() error {
 	return nil
 }
 
-// Returns a new migrator.
-func NewMigrator(db *sql.DB, adapter Migratable, migrationsPath string) (*Migrator, error) {
-	return NewMigratorWithLogger(db, adapter, migrationsPath, log.New(os.Stderr, "[gomigrate] ", log.LstdFlags))
-}
-
 // Returns a new migrator with the specified logger.
-func NewMigratorWithLogger(db *sql.DB, adapter Migratable, migrationsPath string, logger Logger) (*Migrator, error) {
-	// Normalize the migrations path.
-	path := []byte(migrationsPath)
-	pathLength := len(path)
-	if path[pathLength-1] != '/' {
-		path = append(path, '/')
-	}
-
-	logger.Printf("Migrations path: %s", path)
+func NewMigratorWithLogger(db *sql.DB, adapter Migratable, ms MigrationSource, logger Logger) (*Migrator, error) {
 
 	migrator := Migrator{
 		db,
-		string(path),
 		adapter,
 		make(map[uint64]*Migration),
 		logger,
+		ms,
 	}
 
 	// Create the migrations table if it doesn't exist.
@@ -108,7 +92,8 @@ func NewMigratorWithLogger(db *sql.DB, adapter Migratable, migrationsPath string
 	}
 
 	// Get all metadata from the database.
-	if err := migrator.fetchMigrations(); err != nil {
+	migrator.migrations, err = migrator.Source.FindMigrations(logger)
+	if err != nil {
 		return nil, err
 	}
 	if err := migrator.getMigrationStatuses(); err != nil {
@@ -116,53 +101,6 @@ func NewMigratorWithLogger(db *sql.DB, adapter Migratable, migrationsPath string
 	}
 
 	return &migrator, nil
-}
-
-// Populates a migrator with a sorted list of migrations from the file system.
-func (m *Migrator) fetchMigrations() error {
-	pathGlob := append([]byte(m.MigrationsPath), []byte("*")...)
-
-	matches, err := filepath.Glob(string(pathGlob))
-	if err != nil {
-		m.logger.Fatalf("Error while globbing migrations: %v", err)
-	}
-
-	for _, match := range matches {
-		num, migrationType, name, err := parseMigrationPath(match)
-		if err != nil {
-			m.logger.Printf("Invalid migration file found: %s", match)
-			continue
-		}
-
-		m.logger.Printf("Migration file found: %s", match)
-
-		migration, ok := m.migrations[num]
-		if !ok {
-			migration = &Migration{Id: num, Name: name, Status: Inactive}
-			m.migrations[num] = migration
-		}
-		if migrationType == upMigration {
-			migration.UpPath = match
-		} else {
-			migration.DownPath = match
-		}
-	}
-
-	// Validate each migration.
-	for _, migration := range m.migrations {
-		if !migration.valid() {
-			path := migration.UpPath
-			if path == "" {
-				path = migration.DownPath
-			}
-			m.logger.Printf("Invalid migration pair for path: %s", path)
-			return InvalidMigrationPair
-		}
-	}
-
-	m.logger.Printf("Migrations file pairs found: %v", len(m.migrations))
-
-	return nil
 }
 
 // Queries the migration table to determine the status of each
@@ -222,7 +160,18 @@ func (m *Migrator) ApplyMigration(migration *Migration, mType migrationType) err
 
 	m.logger.Printf("Applying migration: %s", path)
 
-	sql, err := ioutil.ReadFile(path)
+	var sql []byte
+	var err error
+
+	switch m.Source.(type) {
+	case *FileMigrationSource:
+		sql, err = ioutil.ReadFile(path)
+	case *AssetMigrationSource:
+		sql, err = m.Source.(*AssetMigrationSource).Asset(path)
+	default:
+		m.logger.Println("Unsupport MigrationSource type")
+		return errors.New("Unsupport MigrationSource type")
+	}
 	if err != nil {
 		m.logger.Printf("Error reading migration: %s", path)
 		return err
